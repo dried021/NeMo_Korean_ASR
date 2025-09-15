@@ -1,0 +1,8 @@
+# 오디오 처리
+librosa>=0.10.0
+soundfile>=0.12.1  # librosa에서 WAV 읽기에 필요
+
+# 수치 계산
+numpy>=1.23.0
+
+# CSV 처리, OS 관련은 Python 내장 모듈 사용하므로 별도 설치 필요 없음
