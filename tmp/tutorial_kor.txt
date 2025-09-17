@@ -1,0 +1,190 @@
+try:
+    import torch
+    import torchvision
+    import torchaudio
+    import numpy as np
+    import tensorboard
+    import pytorch_lightning as pl
+    import nemo
+    import nemo.collections.asr as nemo_asr
+    print("✅ 모든 패키지 임포트 성공!")
+except Exception as e:
+    print("❌ 패키지 임포트 실패:", e)
+
+# PyTorch 버전 및 CUDA 확인
+print("PyTorch version:", torch.__version__)
+print("Torchvision version:", torchvision.__version__)
+print("Torchaudio version:", torchaudio.__version__)
+print("CUDA available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("CUDA device name:", torch.cuda.get_device_name(0))
+
+# NumPy, TensorBoard, PyTorch Lightning 버전 확인
+print("NumPy version:", np.__version__)
+print("TensorBoard version:", tensorboard.__version__)
+print("PyTorch Lightning version:", pl.__version__)
+
+# NeMo version 확인
+print("NeMo version:", nemo.__version__)
+
+!pip install --upgrade pip
+# !pip install torch==2.1.2 torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu118 
+!pip install numpy==1.24.4
+!pip install tensorboard==2.14.0
+!pip install pytorch-lightning==2.1.2
+!pip install git+https://github.com/NVIDIA/NeMo.git@main#egg=nemo_toolkit[asr]
+
+!pip install wget
+!apt-get install sox libsndfile1 ffmpeg
+!pip install text-unidecode
+!pip install matplotlib>=3.3.2
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+AUDIO_DIR = "/content/drive/MyDrive/NeMo_Korean_ASR/data/raw/kss"
+DATA_DIR = "/content/drive/MyDrive/NeMo_Korean_ASR/data/processed/kss"
+# CHECKPOINT_DIR = "/content/drive/MyDrive/NeMo_Korean_ASR/checkpoints"
+# os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+# manifest 파일 경로
+train_manifest = os.path.join(DATA_DIR, "train_manifest.json")
+val_manifest = os.path.join(DATA_DIR, "val_manifest.json")
+test_manifest = os.path.join(DATA_DIR, "test_manifest.json")
+
+# 데이터 확인
+import librosa
+import IPython.display as ipd
+
+# Load and listen to the audio file
+example_file = AUDIO_DIR + '/1/1_1040.wav'
+audio, sample_rate = librosa.load(example_file)
+
+ipd.Audio(example_file, rate=sample_rate)
+
+# NeMo's "core" package
+import nemo
+# NeMo's ASR collection - this collections contains complete ASR models and
+# building blocks (modules) for ASR
+import nemo.collections.asr as nemo_asr
+
+import nemo.collections.asr as nemo_asr
+
+# EncDecCTCModel에서 사용 가능한 모든 사전 훈련 모델
+ctc_models = nemo_asr.models.EncDecCTCModel.list_available_models()
+print("CTC Models:")
+for model in ctc_models:
+    print(f"  - {model}")
+
+# EncDecRNNTModel (RNN-Transducer) 모델들
+rnnt_models = nemo_asr.models.EncDecRNNTModel.list_available_models()
+print("\nRNN-T Models:")
+for model in rnnt_models:
+    print(f"  - {model}")
+
+# Conformer 기반 모델들
+conformer_models = nemo_asr.models.EncDecCTCModelBPE.list_available_models()
+print("\nConformer CTC Models:")
+for model in conformer_models:
+    print(f"  - {model}")
+
+quartznet = nemo_asr.models.EncDecCTCModel.from_pretrained(model_name="QuartzNet15x5Base-En")
+
+import torch
+print(f"CUDA available: {torch.cuda.is_available()}")
+print(f"CUDA device count: {torch.cuda.device_count()}")
+if torch.cuda.is_available():
+    print(f"Current device: {torch.cuda.current_device()}")
+    print(f"Device name: {torch.cuda.get_device_name(0)}")
+
+# --- Config Information ---#
+try:
+    from ruamel.yaml import YAML
+except ModuleNotFoundError:
+    from ruamel_yaml import YAML
+config_path = './configs/config.yaml'
+
+if not os.path.exists(config_path):
+    # Grab the config we'll use in this example
+    BRANCH = 'main'
+    !mkdir configs
+    !wget -P configs/ https://raw.githubusercontent.com/NVIDIA/NeMo/$BRANCH/examples/asr/conf/config.yaml
+
+yaml = YAML(typ='safe')
+with open(config_path) as f:
+    params = yaml.load(f)
+print(params)
+
+import lightning.pytorch as pl
+trainer = pl.Trainer(devices=1, accelerator='gpu', max_epochs=50)
+
+# 한국어 자모 라벨 정의
+korean_labels = list("ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ ")
+
+from omegaconf import DictConfig
+params['model']['train_ds']['manifest_filepath'] = train_manifest
+params['model']['validation_ds']['manifest_filepath'] = test_manifest
+
+#label 한국어로 변경
+params['model']['train_ds']['labels'] = korean_labels
+params['model']['validation_ds']['labels'] = korean_labels
+
+first_asr_model = nemo_asr.models.EncDecCTCModel(cfg=DictConfig(params['model']), trainer=trainer)
+first_asr_model.change_vocabulary(new_vocabulary=korean_labels)
+
+# Start training!!!
+trainer.fit(first_asr_model)
+
+print(params['model']['optim'])
+
+import copy
+new_opt = copy.deepcopy(params['model']['optim'])
+new_opt['lr'] = 0.001
+first_asr_model.setup_optimization(optim_config=DictConfig(new_opt))
+# And then you can invoke trainer.fit(first_asr_model)
+first_asr_model.cuda()
+first_asr_model.eval()
+audio = [os.path.join(AUDIO_DIR, '1/1_1000.wav'),
+                    os.path.join(AUDIO_DIR, '1/1_1001.wav'),
+                    os.path.join(AUDIO_DIR, '1/1_1002.wav'),
+                    os.path.join(AUDIO_DIR, '1/1_1003.wav'),]
+print(first_asr_model.transcribe(audio=audio,
+                                 batch_size=4))
+
+                  # Bigger batch-size = bigger throughput
+params['model']['validation_ds']['batch_size'] = 16
+
+# Setup the test data loader and make sure the model is on GPU
+first_asr_model.setup_test_data(test_data_config=params['model']['validation_ds'])
+first_asr_model.cuda()
+first_asr_model.eval()
+
+# We will be computing Word Error Rate (WER) metric between our hypothesis and predictions.
+# WER is computed as numerator/denominator.
+# We'll gather all the test batches' numerators and denominators.
+wer_nums = []
+wer_denoms = []
+
+# Loop over all test batches.
+# Iterating over the model's `test_dataloader` will give us:
+# (audio_signal, audio_signal_length, transcript_tokens, transcript_length)
+# See the AudioToCharDataset for more details.
+for test_batch in first_asr_model.test_dataloader():
+        test_batch = [x.cuda() for x in test_batch]
+        targets = test_batch[2]
+        targets_lengths = test_batch[3]        
+        log_probs, encoded_len, greedy_predictions = first_asr_model(
+            input_signal=test_batch[0], input_signal_length=test_batch[1]
+        )
+        # Notice the model has a helper object to compute WER
+        first_asr_model.wer.update(predictions=greedy_predictions, predictions_lengths=None, targets=targets, targets_lengths=targets_lengths)
+        _, wer_num, wer_denom = first_asr_model.wer.compute()
+        first_asr_model.wer.reset()
+        wer_nums.append(wer_num.detach().cpu().numpy())
+        wer_denoms.append(wer_denom.detach().cpu().numpy())
+
+        # Release tensors from GPU memory
+        del test_batch, log_probs, targets, targets_lengths, encoded_len, greedy_predictions
+
+# We need to sum all numerators and denominators first. Then divide.
+print(f"WER = {sum(wer_nums)/sum(wer_denoms)}")              

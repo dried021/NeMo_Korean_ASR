@@ -1,0 +1,246 @@
+# # Colab 환경 초기화 (런타임 재시작 필요)
+# !pip install --upgrade pip
+# !pip install torch==2.1.2 torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu118
+# !pip install numpy==1.24.4
+# !pip install tensorboard==2.14.0
+# !pip install pytorch-lightning==2.1.2
+# !pip install git+https://github.com/NVIDIA/NeMo.git@main#egg=nemo_toolkit[asr]
+
+!pip install wget
+!apt-get install sox libsndfile1 ffmpeg
+!pip install text-unidecode
+!pip install matplotlib>=3.3.2
+
+## Install NeMo
+# BRANCH = 'main'
+
+import os
+# This is where the an4/ directory will be placed.
+# Change this if you don't want the data to be extracted in the current directory.
+data_dir = '/content'
+
+if not os.path.exists(data_dir):
+  os.makedirs(data_dir)
+
+import glob
+import os
+import subprocess
+import tarfile
+import wget
+
+# Download the dataset. This will take a few moments...
+print("******")
+if not os.path.exists(data_dir + '/an4_sphere.tar.gz'):
+    an4_url = 'https://dldata-public.s3.us-east-2.amazonaws.com/an4_sphere.tar.gz'
+    an4_path = wget.download(an4_url, data_dir)
+    print(f"Dataset downloaded at: {an4_path}")
+else:
+    print("Tarfile already exists.")
+    an4_path = data_dir + '/an4_sphere.tar.gz'
+
+if not os.path.exists(data_dir + '/an4/'):
+    # Untar and convert .sph to .wav (using sox)
+    tar = tarfile.open(an4_path)
+    tar.extractall(path=data_dir)
+
+    print("Converting .sph to .wav...")
+    sph_list = glob.glob(data_dir + '/an4/**/*.sph', recursive=True)
+    for sph_path in sph_list:
+        wav_path = sph_path[:-4] + '.wav'
+        cmd = ["sox", sph_path, wav_path]
+        subprocess.run(cmd)
+print("Finished conversion.\n******")
+
+# NeMo's "core" package
+import nemo
+# NeMo's ASR collection - this collections contains complete ASR models and
+# building blocks (modules) for ASR
+import nemo.collections.asr as nemo_asr
+
+quartznet = nemo_asr.models.EncDecCTCModel.from_pretrained(model_name="QuartzNet15x5Base-En")
+
+files = [os.path.join(data_dir, 'an4/wav/an4_clstk/mgah/cen2-mgah-b.wav')]
+for fname, transcription in zip(files, quartznet.transcribe(audio=files)):
+  print(f"Audio in {fname} was recognized as: {transcription}")
+
+# --- Building Manifest Files --- #
+import json
+
+# Function to build a manifest
+def build_manifest(transcripts_path, manifest_path, wav_path):
+    with open(transcripts_path, 'r') as fin:
+        with open(manifest_path, 'w') as fout:
+            for line in fin:
+                # Lines look like this:
+                # <s> transcript </s> (fileID)
+                transcript = line[: line.find('(')-1].lower()
+                transcript = transcript.replace('<s>', '').replace('</s>', '')
+                transcript = transcript.strip()
+
+                file_id = line[line.find('(')+1 : -2]  # e.g. "cen4-fash-b"
+                audio_path = os.path.join(
+                    data_dir, wav_path,
+                    file_id[file_id.find('-')+1 : file_id.rfind('-')],
+                    file_id + '.wav')
+
+                duration = librosa.core.get_duration(filename=audio_path)
+
+                # Write the metadata to the manifest
+                metadata = {
+                    "audio_filepath": audio_path,
+                    "duration": duration,
+                    "text": transcript
+                }
+                json.dump(metadata, fout)
+                fout.write('\n')
+                
+# Building Manifests
+print("******")
+train_transcripts = data_dir + '/an4/etc/an4_train.transcription'
+train_manifest = data_dir + '/an4/train_manifest.json'
+if not os.path.isfile(train_manifest):
+    build_manifest(train_transcripts, train_manifest, 'an4/wav/an4_clstk')
+    print("Training manifest created.")
+
+test_transcripts = data_dir + '/an4/etc/an4_test.transcription'
+test_manifest = data_dir + '/an4/test_manifest.json'
+if not os.path.isfile(test_manifest):
+    build_manifest(test_transcripts, test_manifest, 'an4/wav/an4test_clstk')
+    print("Test manifest created.")
+print("***Done***")
+
+import torch
+print(f"CUDA available: {torch.cuda.is_available()}")
+print(f"CUDA device count: {torch.cuda.device_count()}")
+if torch.cuda.is_available():
+    print(f"Current device: {torch.cuda.current_device()}")
+    print(f"Device name: {torch.cuda.get_device_name(0)}")
+
+
+# --- Config Information ---#
+try:
+    from ruamel.yaml import YAML
+except ModuleNotFoundError:
+    from ruamel_yaml import YAML
+config_path = './configs/config.yaml'
+
+if not os.path.exists(config_path):
+    # Grab the config we'll use in this example
+    BRANCH = 'main'
+    !mkdir configs
+    !wget -P configs/ https://raw.githubusercontent.com/NVIDIA/NeMo/$BRANCH/examples/asr/conf/config.yaml
+
+yaml = YAML(typ='safe')
+with open(config_path) as f:
+    params = yaml.load(f)
+print(params)
+
+import lightning.pytorch as pl
+trainer = pl.Trainer(devices=1, accelerator='gpu', max_epochs=50)
+
+type(trainer)
+
+from omegaconf import DictConfig
+params['model']['train_ds']['manifest_filepath'] = train_manifest
+params['model']['validation_ds']['manifest_filepath'] = test_manifest
+first_asr_model = nemo_asr.models.EncDecCTCModel(cfg=DictConfig(params['model']), trainer=trainer)
+
+# Start training!!!
+trainer.fit(first_asr_model)
+
+try:
+  from google import colab
+  COLAB_ENV = True
+except (ImportError, ModuleNotFoundError):
+  COLAB_ENV = False
+
+# Load the TensorBoard notebook extension
+if COLAB_ENV:
+  %load_ext tensorboard
+  %tensorboard --logdir lightning_logs/
+else:
+  print("To use tensorboard, please use this notebook in a Google Colab environment.")
+
+print(params['model']['optim'])
+
+import copy
+new_opt = copy.deepcopy(params['model']['optim'])
+new_opt['lr'] = 0.001
+first_asr_model.setup_optimization(optim_config=DictConfig(new_opt))
+# And then you can invoke trainer.fit(first_asr_model)
+
+first_asr_model.cuda()
+first_asr_model.eval()
+audio = [os.path.join(data_dir, 'an4/wav/an4_clstk/mgah/cen2-mgah-b.wav'),
+                     os.path.join(data_dir, 'an4/wav/an4_clstk/fmjd/cen7-fmjd-b.wav'),
+                     os.path.join(data_dir, 'an4/wav/an4_clstk/fmjd/cen8-fmjd-b.wav'),
+                     os.path.join(data_dir, 'an4/wav/an4_clstk/fkai/cen8-fkai-b.wav')]
+print(first_asr_model.transcribe(audio=audio,
+                                 batch_size=4))
+
+# Bigger batch-size = bigger throughput
+params['model']['validation_ds']['batch_size'] = 16
+
+# Setup the test data loader and make sure the model is on GPU
+first_asr_model.setup_test_data(test_data_config=params['model']['validation_ds'])
+first_asr_model.cuda()
+first_asr_model.eval()
+
+# We will be computing Word Error Rate (WER) metric between our hypothesis and predictions.
+# WER is computed as numerator/denominator.
+# We'll gather all the test batches' numerators and denominators.
+wer_nums = []
+wer_denoms = []
+
+# Loop over all test batches.
+# Iterating over the model's `test_dataloader` will give us:
+# (audio_signal, audio_signal_length, transcript_tokens, transcript_length)
+# See the AudioToCharDataset for more details.
+for test_batch in first_asr_model.test_dataloader():
+        test_batch = [x.cuda() for x in test_batch]
+        targets = test_batch[2]
+        targets_lengths = test_batch[3]        
+        log_probs, encoded_len, greedy_predictions = first_asr_model(
+            input_signal=test_batch[0], input_signal_length=test_batch[1]
+        )
+        # Notice the model has a helper object to compute WER
+        first_asr_model.wer.update(predictions=greedy_predictions, predictions_lengths=None, targets=targets, targets_lengths=targets_lengths)
+        _, wer_num, wer_denom = first_asr_model.wer.compute()
+        first_asr_model.wer.reset()
+        wer_nums.append(wer_num.detach().cpu().numpy())
+        wer_denoms.append(wer_denom.detach().cpu().numpy())
+
+        # Release tensors from GPU memory
+        del test_batch, log_probs, targets, targets_lengths, encoded_len, greedy_predictions
+
+# We need to sum all numerators and denominators first. Then divide.
+print(f"WER = {sum(wer_nums)/sum(wer_denoms)}")
+
+print(quartznet._cfg['spec_augment'])
+
+# Check what kind of vocabulary/alphabet the model has right now
+print(quartznet.decoder.vocabulary)
+
+# Let's add "!" symbol there. Note that you can (and should!) change the vocabulary
+# entirely when fine-tuning using a different language.
+quartznet.change_vocabulary(
+    new_vocabulary=[
+        ' ', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n',
+        'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', "'", "!"
+    ]
+)
+
+# Use the smaller learning rate we set before
+quartznet.setup_optimization(optim_config=DictConfig(new_opt))
+
+# Point to the data we'll use for fine-tuning as the training set
+quartznet.setup_training_data(train_data_config=params['model']['train_ds'])
+
+# Point to the new validation data for fine-tuning
+quartznet.setup_validation_data(val_data_config=params['model']['validation_ds'])
+
+# And now we can create a PyTorch Lightning trainer and call `fit` again.
+trainer = pl.Trainer(devices=1, accelerator='gpu', max_epochs=2)
+trainer.fit(quartznet)
+
+
